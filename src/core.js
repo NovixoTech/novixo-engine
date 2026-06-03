@@ -1,9 +1,8 @@
 /**
- * core.js — Novixo Sync (Phase 1.4)
+ * core.js — Novixo Sync (Phase 3)
  * ─────────────────────────────────────
  * Brain of Novixo Sync.
- * Updated for Phase 1.4: all queue/storage calls are now properly awaited.
- * Logic is identical to Phase 1.3.
+ * Phase 3 adds: conflict detection + resolution inside trySyncItem.
  */
 
 import {
@@ -24,18 +23,33 @@ import {
 
 import { isStorageAvailable, initStorage } from "./storage.js";
 
+import {
+  resolveConflict,
+  isConflict,
+  ConflictStrategy,
+} from "./conflict.js";
+
 // ─────────────────────────────────────────────
 // Configuration defaults
 // ─────────────────────────────────────────────
+
 const DEFAULT_CONFIG = {
-  retryLimit: 5,        // Max retries per item before giving up
-  retryDelay: 3000,     // ms between retry sweeps
-  autoSync: true,       // Auto-sync when back online
-  platform: null,       // "web" | "mobile" | null (auto-detect)
-  onSyncSuccess: null,  // Callback: (item) => {}
-  onSyncFailure: null,  // Callback: (item, error) => {}
-  onQueueChange: null,  // Callback: (queueSize) => {}
-  syncHandler: null,    // REQUIRED: async (item) => true/false
+  retryLimit: 5,                              // Max retries per item
+  retryDelay: 3000,                           // ms between retry sweeps
+  autoSync: true,                             // Auto-sync on reconnect
+  platform: null,                             // "web" | "mobile" | null
+
+  // ── Conflict Resolution (Phase 3) ──
+  conflictStrategy: ConflictStrategy.LAST_WRITE_WINS,
+  onConflict: null,  // Required if strategy = MANUAL
+                     // async (clientItem, serverItem) => resolvedItem
+  onConflictResolved: null, // Callback: (resolvedItem, strategy) => {}
+
+  // ── Callbacks ──
+  onSyncSuccess: null,   // (item) => {}
+  onSyncFailure: null,   // (item, error) => {}
+  onQueueChange: null,   // (queueSize) => {}
+  syncHandler: null,     // REQUIRED: async (item) => true | false | { conflict, serverItem }
 };
 
 let config = { ...DEFAULT_CONFIG };
@@ -43,13 +57,9 @@ let retryTimer = null;
 let initialized = false;
 
 // ─────────────────────────────────────────────
-// PUBLIC: Initialize the SDK
+// PUBLIC: Initialize
 // ─────────────────────────────────────────────
 
-/**
- * Initialize Novixo Sync
- * @param {Object} userConfig
- */
 export async function init(userConfig = {}) {
   if (initialized) {
     console.warn("[NovixoSync] Already initialized.");
@@ -59,53 +69,44 @@ export async function init(userConfig = {}) {
   config = { ...DEFAULT_CONFIG, ...userConfig };
 
   if (!config.syncHandler) {
-    console.error(
-      "[NovixoSync] No syncHandler provided. Pass { syncHandler: async (item) => bool } to init()."
-    );
+    console.error("[NovixoSync] No syncHandler provided.");
   }
 
-  // Boot the correct storage adapter (web = IndexedDB, mobile = AsyncStorage)
+  // Boot storage adapter
   await initStorage(config.platform);
 
-  // Check storage availability
   const storageOk = await isStorageAvailable();
   if (!storageOk) {
-    console.warn("[NovixoSync] Storage not available. Queue won't persist across sessions.");
+    console.warn("[NovixoSync] Storage not available. Queue won't persist.");
   } else {
     console.log("[NovixoSync] Storage ready ✓");
   }
 
-  // Load any items queued from a previous session
+  // Load persisted queue
   await loadQueue();
 
-  // Start watching network status
+  // Start network monitor
   startNetworkMonitor();
 
-  // When we come back online → auto-sync the queue
+  // Auto-sync on reconnect
   if (config.autoSync) {
     onNetworkChange("online", async () => {
       console.log("[NovixoSync] Back online — starting sync sweep.");
-      await resetFailed(); // Allow previously-failed items to retry
+      await resetFailed();
       startRetrySweep();
     });
   }
 
   initialized = true;
-  console.log("[NovixoSync] Core initialized. Queue size:", queueSize());
+  console.log(
+    `[NovixoSync] Core initialized ✓ | Strategy: ${config.conflictStrategy} | Queue: ${queueSize()}`
+  );
 }
 
 // ─────────────────────────────────────────────
-// PUBLIC: Queue data to be sent
+// PUBLIC: Send / queue an item
 // ─────────────────────────────────────────────
 
-/**
- * Queue data for sending.
- * → If online:  attempts immediate send
- * → If offline: stores in IndexedDB queue for later
- *
- * @param {Object} data - { type, payload }
- * @returns {Promise<string>} item ID
- */
 export async function send(data) {
   const id = await addToQueue(data);
   notifyQueueChange();
@@ -113,20 +114,16 @@ export async function send(data) {
   if (isOnline() && config.syncHandler) {
     await trySyncItem({ id, ...data, retries: 0, status: "pending" });
   } else {
-    console.log(`[NovixoSync] Offline — item [${id}] stored in IndexedDB queue.`);
+    console.log(`[NovixoSync] Offline — item [${id}] queued.`);
   }
 
   return id;
 }
 
 // ─────────────────────────────────────────────
-// PUBLIC: Manually trigger a sync
+// PUBLIC: Manual sync trigger
 // ─────────────────────────────────────────────
 
-/**
- * Sync all pending queue items immediately
- * @returns {Promise<void>}
- */
 export async function syncNow() {
   if (!isOnline()) {
     console.log("[NovixoSync] Cannot sync — offline.");
@@ -152,21 +149,64 @@ export async function syncNow() {
 }
 
 // ─────────────────────────────────────────────
-// INTERNAL: Try to sync one item via syncHandler
+// INTERNAL: Try to sync one item
+// Phase 3: now handles conflict responses
 // ─────────────────────────────────────────────
 
 async function trySyncItem(item) {
   try {
-    const success = await config.syncHandler(item);
+    // Call the developer's sync function
+    // It can return:
+    //   true                              → success
+    //   false                             → failure, retry later
+    //   { conflict: true, serverItem: {} } → conflict detected
+    const response = await config.syncHandler(item);
 
-    if (success) {
+    // ── CONFLICT DETECTED ──
+    if (isConflict(response)) {
+      console.log(`[NovixoSync] Conflict detected for item [${item.id}]`);
+
+      const resolved = await resolveConflict(
+        item,
+        response.serverItem,
+        config.conflictStrategy,
+        config.onConflict
+      );
+
+      // Notify developer of resolution
+      if (config.onConflictResolved) {
+        config.onConflictResolved(resolved, config.conflictStrategy);
+      }
+
+      // Mark original as synced — the resolved version is the truth now
+      await markSynced(item.id);
+      notifyQueueChange();
+
+      // If client won, re-queue the resolved item for a final push to server
+      if (resolved.id === item.id) {
+        console.log(`[NovixoSync] Client version won — re-queuing resolved item [${item.id}]`);
+        await addToQueue({ ...resolved, id: undefined }); // New ID, fresh queue entry
+        notifyQueueChange();
+      } else {
+        // Server won — nothing more to push
+        console.log(`[NovixoSync] Server version accepted for item [${item.id}]`);
+      }
+
+      return;
+    }
+
+    // ── SUCCESS ──
+    if (response === true) {
       await markSynced(item.id);
       notifyQueueChange();
       if (config.onSyncSuccess) config.onSyncSuccess(item);
       console.log(`[NovixoSync] Item [${item.id}] synced ✓`);
-    } else {
-      throw new Error("syncHandler returned false");
+      return;
     }
+
+    // ── FAILURE (returned false) ──
+    throw new Error("syncHandler returned false");
+
   } catch (err) {
     await markFailed(item.id);
     notifyQueueChange();
@@ -176,11 +216,11 @@ async function trySyncItem(item) {
 }
 
 // ─────────────────────────────────────────────
-// INTERNAL: Retry sweep (runs while online)
+// INTERNAL: Retry sweep
 // ─────────────────────────────────────────────
 
 function startRetrySweep() {
-  if (retryTimer) return; // Already running
+  if (retryTimer) return;
 
   retryTimer = setInterval(async () => {
     if (!isOnline() || getPendingItems().length === 0) {
@@ -203,9 +243,7 @@ function stopRetrySweep() {
 // ─────────────────────────────────────────────
 
 function notifyQueueChange() {
-  if (config.onQueueChange) {
-    config.onQueueChange(queueSize());
-  }
+  if (config.onQueueChange) config.onQueueChange(queueSize());
 }
 
 // ─────────────────────────────────────────────
