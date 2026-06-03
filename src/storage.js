@@ -1,210 +1,130 @@
 /**
- * storage.js — Novixo Sync (Phase 1.4)
+ * storage.js — Novixo Sync (Phase 2)
  * ─────────────────────────────────────
- * Upgraded from localStorage → IndexedDB.
+ * Smart storage router.
+ * Automatically picks the right adapter based on environment:
  *
- * WHY IndexedDB?
- *  • localStorage: ~5MB limit, synchronous, strings only
- *  • IndexedDB:    ~50MB+ limit, async, stores any JS object
+ *   Browser  → IndexedDB adapter  (Phase 1.4)
+ *   Mobile   → AsyncStorage adapter (Phase 2)
  *
- * SAME PUBLIC API as before — queue.js needs zero logic changes,
- * only needs to await these calls.
+ * HOW TO USE:
+ *   - Web project:    no change needed — IndexedDB is auto-selected
+ *   - Mobile project: set NOVIXO_PLATFORM = "mobile" before calling init()
  *
- * ADAPTER PATTERN:
- *  This file is the storage adapter. For Phase 2 (React Native),
- *  swap this file for an SQLite adapter — everything else stays the same.
+ * queue.js, core.js, network.js stay 100% unchanged.
+ * Only THIS file knows about adapters.
  */
 
-const DB_NAME = "novixo_db";
-const DB_VERSION = 1;
-const STORE_NAME = "novixo_store";
-
-let db = null; // Cached DB connection
-
 // ─────────────────────────────────────────────
-// INTERNAL: Open (or reuse) the IndexedDB connection
-// ─────────────────────────────────────────────
-function openDB() {
-  return new Promise((resolve, reject) => {
-    // Return cached connection if already open
-    if (db) return resolve(db);
-
-    if (typeof indexedDB === "undefined") {
-      return reject(new Error("IndexedDB is not available in this environment."));
-    }
-
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-    // Runs on first open OR version upgrade
-    request.onupgradeneeded = (event) => {
-      const database = event.target.result;
-
-      if (!database.objectStoreNames.contains(STORE_NAME)) {
-        database.createObjectStore(STORE_NAME, { keyPath: "key" });
-        console.log("[NovixoSync:Storage] IndexedDB store created.");
-      }
-    };
-
-    request.onsuccess = (event) => {
-      db = event.target.result;
-      console.log("[NovixoSync:Storage] IndexedDB opened successfully.");
-      resolve(db);
-    };
-
-    request.onerror = (event) => {
-      console.error("[NovixoSync:Storage] Failed to open IndexedDB:", event.target.error);
-      reject(event.target.error);
-    };
-  });
-}
-
-// ─────────────────────────────────────────────
-// INTERNAL: Get a transaction + object store
-// ─────────────────────────────────────────────
-async function getStore(mode = "readonly") {
-  const database = await openDB();
-  const tx = database.transaction(STORE_NAME, mode);
-  return tx.objectStore(STORE_NAME);
-}
-
-// ─────────────────────────────────────────────
-// PUBLIC API
-// (Same function names as the old localStorage version)
+// Detect environment
 // ─────────────────────────────────────────────
 
 /**
- * Save a value to IndexedDB
+ * Returns true if running inside React Native / Expo
+ */
+function isReactNative() {
+  return (
+    typeof navigator !== "undefined" &&
+    navigator.product === "ReactNative"
+  );
+}
+
+// ─────────────────────────────────────────────
+// Load the correct adapter
+// ─────────────────────────────────────────────
+
+let adapter = null;
+
+/**
+ * Initialize the storage adapter.
+ * Call this once — core.js calls it automatically during init().
+ *
+ * @param {"web"|"mobile"} platform — override auto-detection if needed
+ */
+export async function initStorage(platform) {
+  const env = platform || (isReactNative() ? "mobile" : "web");
+
+  if (env === "mobile") {
+    // React Native / Expo
+    const mod = await import("./adapters/asyncstorage.adapter.js");
+    adapter = mod;
+    console.log("[NovixoSync:Storage] Adapter: AsyncStorage (mobile) ✓");
+  } else {
+    // Browser
+    const mod = await import("./adapters/indexeddb.adapter.js");
+    adapter = mod;
+    console.log("[NovixoSync:Storage] Adapter: IndexedDB (web) ✓");
+  }
+}
+
+// ─────────────────────────────────────────────
+// PUBLIC API — delegates to active adapter
+// queue.js calls these — it never touches adapters directly
+// ─────────────────────────────────────────────
+
+function requireAdapter(fnName) {
+  if (!adapter) {
+    throw new Error(
+      `[NovixoSync:Storage] Storage not initialized. Call Novixo.init() before ${fnName}().`
+    );
+  }
+}
+
+/**
+ * Save a value
  * @param {string} key
- * @param {any} value — stored as a JS object, no JSON.stringify needed
+ * @param {any} value
  * @returns {Promise<boolean>}
  */
 export async function saveLocal(key, value) {
-  try {
-    const store = await getStore("readwrite");
-
-    return new Promise((resolve, reject) => {
-      const request = store.put({ key, value });
-      request.onsuccess = () => resolve(true);
-      request.onerror = (e) => reject(e.target.error);
-    });
-  } catch (e) {
-    console.warn(`[NovixoSync:Storage] Failed to save key "${key}":`, e);
-    return false;
-  }
+  requireAdapter("saveLocal");
+  return adapter.saveLocal(key, value);
 }
 
 /**
- * Load a value from IndexedDB
+ * Load a value
  * @param {string} key
- * @param {any} fallback — returned if key not found
+ * @param {any} fallback
  * @returns {Promise<any>}
  */
 export async function loadLocal(key, fallback = null) {
-  try {
-    const store = await getStore("readonly");
-
-    return new Promise((resolve, reject) => {
-      const request = store.get(key);
-      request.onsuccess = (e) => {
-        const result = e.target.result;
-        resolve(result ? result.value : fallback);
-      };
-      request.onerror = (e) => reject(e.target.error);
-    });
-  } catch (e) {
-    console.warn(`[NovixoSync:Storage] Failed to load key "${key}":`, e);
-    return fallback;
-  }
+  requireAdapter("loadLocal");
+  return adapter.loadLocal(key, fallback);
 }
 
 /**
- * Remove a key from IndexedDB
+ * Remove a key
  * @param {string} key
  * @returns {Promise<boolean>}
  */
 export async function removeLocal(key) {
-  try {
-    const store = await getStore("readwrite");
-
-    return new Promise((resolve, reject) => {
-      const request = store.delete(key);
-      request.onsuccess = () => resolve(true);
-      request.onerror = (e) => reject(e.target.error);
-    });
-  } catch (e) {
-    console.warn(`[NovixoSync:Storage] Failed to remove key "${key}":`, e);
-    return false;
-  }
+  requireAdapter("removeLocal");
+  return adapter.removeLocal(key);
 }
 
 /**
- * Clear all Novixo-related keys (keys prefixed with "novixo_")
+ * Clear all Novixo data
  * @returns {Promise<boolean>}
  */
 export async function clearAllNovixoData() {
-  try {
-    const store = await getStore("readwrite");
-
-    return new Promise((resolve, reject) => {
-      const keysToDelete = [];
-      const cursorRequest = store.openCursor();
-
-      cursorRequest.onsuccess = (e) => {
-        const cursor = e.target.result;
-        if (cursor) {
-          if (cursor.key.startsWith("novixo_")) {
-            keysToDelete.push(cursor.key);
-          }
-          cursor.continue();
-        } else {
-          // All keys scanned — now delete matching ones
-          let deleteCount = 0;
-          keysToDelete.forEach((key) => {
-            const del = store.delete(key);
-            del.onsuccess = () => {
-              deleteCount++;
-              if (deleteCount === keysToDelete.length) {
-                console.log(
-                  `[NovixoSync:Storage] Cleared ${keysToDelete.length} Novixo key(s).`
-                );
-                resolve(true);
-              }
-            };
-          });
-
-          // If nothing to delete, resolve immediately
-          if (keysToDelete.length === 0) resolve(true);
-        }
-      };
-
-      cursorRequest.onerror = (e) => reject(e.target.error);
-    });
-  } catch (e) {
-    console.warn("[NovixoSync:Storage] Failed to clear Novixo data:", e);
-    return false;
-  }
+  requireAdapter("clearAllNovixoData");
+  return adapter.clearAllNovixoData();
 }
 
 /**
- * Check if IndexedDB is available in this environment
+ * Check if storage is available
  * @returns {Promise<boolean>}
  */
 export async function isStorageAvailable() {
-  try {
-    await openDB();
-    return true;
-  } catch (e) {
-    return false;
-  }
+  if (!adapter) return false;
+  return adapter.isStorageAvailable();
 }
 
 /**
- * Close the DB connection (useful for testing / cleanup)
+ * Close storage connection (web only — no-op on mobile)
  */
 export function closeDB() {
-  if (db) {
-    db.close();
-    db = null;
-    console.log("[NovixoSync:Storage] IndexedDB connection closed.");
+  if (adapter && adapter.closeDB) {
+    adapter.closeDB();
   }
-  }
+}
