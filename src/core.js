@@ -1,7 +1,9 @@
 /**
- * core.js — Novixo Sync
- * The brain of Novixo Sync.
- * Decides: what to store | what to send | when to retry
+ * core.js — Novixo Sync (Phase 1.4)
+ * ─────────────────────────────────────
+ * Brain of Novixo Sync.
+ * Updated for Phase 1.4: all queue/storage calls are now properly awaited.
+ * Logic is identical to Phase 1.3.
  */
 
 import {
@@ -22,26 +24,32 @@ import {
 
 import { isStorageAvailable } from "./storage.js";
 
+// ─────────────────────────────────────────────
 // Configuration defaults
+// ─────────────────────────────────────────────
 const DEFAULT_CONFIG = {
-  retryLimit: 5,           // Max retries per item before giving up
-  retryDelay: 3000,        // ms between retry sweeps
-  autoSync: true,          // Auto-sync when back online
-  onSyncSuccess: null,     // Callback: (item) => {}
-  onSyncFailure: null,     // Callback: (item, error) => {}
-  onQueueChange: null,     // Callback: (queueSize) => {}
-  syncHandler: null,       // Required: async (item) => true/false
+  retryLimit: 5,        // Max retries per item before giving up
+  retryDelay: 3000,     // ms between retry sweeps
+  autoSync: true,       // Auto-sync when back online
+  onSyncSuccess: null,  // Callback: (item) => {}
+  onSyncFailure: null,  // Callback: (item, error) => {}
+  onQueueChange: null,  // Callback: (queueSize) => {}
+  syncHandler: null,    // REQUIRED: async (item) => true/false
 };
 
 let config = { ...DEFAULT_CONFIG };
 let retryTimer = null;
 let initialized = false;
 
+// ─────────────────────────────────────────────
+// PUBLIC: Initialize the SDK
+// ─────────────────────────────────────────────
+
 /**
- * Initialize Novixo Sync core
+ * Initialize Novixo Sync
  * @param {Object} userConfig
  */
-export function init(userConfig = {}) {
+export async function init(userConfig = {}) {
   if (initialized) {
     console.warn("[NovixoSync] Already initialized.");
     return;
@@ -55,21 +63,25 @@ export function init(userConfig = {}) {
     );
   }
 
-  if (!isStorageAvailable()) {
-    console.warn("[NovixoSync] localStorage not available. Queue won't persist across sessions.");
+  // Check IndexedDB availability
+  const storageOk = await isStorageAvailable();
+  if (!storageOk) {
+    console.warn("[NovixoSync] IndexedDB not available. Queue won't persist across sessions.");
+  } else {
+    console.log("[NovixoSync] IndexedDB ready ✓");
   }
 
   // Load any items queued from a previous session
-  loadQueue();
+  await loadQueue();
 
   // Start watching network status
   startNetworkMonitor();
 
-  // When we come back online, auto-sync the queue
+  // When we come back online → auto-sync the queue
   if (config.autoSync) {
-    onNetworkChange("online", () => {
+    onNetworkChange("online", async () => {
       console.log("[NovixoSync] Back online — starting sync sweep.");
-      resetFailed();       // Allow previously-failed items to retry
+      await resetFailed(); // Allow previously-failed items to retry
       startRetrySweep();
     });
   }
@@ -78,54 +90,38 @@ export function init(userConfig = {}) {
   console.log("[NovixoSync] Core initialized. Queue size:", queueSize());
 }
 
+// ─────────────────────────────────────────────
+// PUBLIC: Queue data to be sent
+// ─────────────────────────────────────────────
+
 /**
- * Queue data to be sent.
- * If online: try immediately. If offline: store for later.
+ * Queue data for sending.
+ * → If online:  attempts immediate send
+ * → If offline: stores in IndexedDB queue for later
+ *
  * @param {Object} data - { type, payload }
- * @returns {string} item ID
+ * @returns {Promise<string>} item ID
  */
 export async function send(data) {
-  const id = addToQueue(data);
+  const id = await addToQueue(data);
   notifyQueueChange();
 
   if (isOnline() && config.syncHandler) {
-    // Try to send immediately
     await trySyncItem({ id, ...data, retries: 0, status: "pending" });
   } else {
-    console.log(`[NovixoSync] Offline — item [${id}] queued for later.`);
+    console.log(`[NovixoSync] Offline — item [${id}] stored in IndexedDB queue.`);
   }
 
   return id;
 }
 
-/**
- * Try to sync a single queue item via the developer's syncHandler
- * @param {Object} item
- */
-async function trySyncItem(item) {
-  try {
-    const success = await config.syncHandler(item);
-
-    if (success) {
-      markSynced(item.id);
-      notifyQueueChange();
-
-      if (config.onSyncSuccess) config.onSyncSuccess(item);
-      console.log(`[NovixoSync] Item [${item.id}] synced successfully.`);
-    } else {
-      throw new Error("syncHandler returned false");
-    }
-  } catch (err) {
-    markFailed(item.id);
-    notifyQueueChange();
-
-    if (config.onSyncFailure) config.onSyncFailure(item, err);
-    console.warn(`[NovixoSync] Item [${item.id}] failed to sync:`, err.message);
-  }
-}
+// ─────────────────────────────────────────────
+// PUBLIC: Manually trigger a sync
+// ─────────────────────────────────────────────
 
 /**
- * Attempt to sync all pending items in the queue
+ * Sync all pending queue items immediately
+ * @returns {Promise<void>}
  */
 export async function syncNow() {
   if (!isOnline()) {
@@ -151,9 +147,34 @@ export async function syncNow() {
   }
 }
 
-/**
- * Start the periodic retry sweep (runs while online, stops when queue is empty)
- */
+// ─────────────────────────────────────────────
+// INTERNAL: Try to sync one item via syncHandler
+// ─────────────────────────────────────────────
+
+async function trySyncItem(item) {
+  try {
+    const success = await config.syncHandler(item);
+
+    if (success) {
+      await markSynced(item.id);
+      notifyQueueChange();
+      if (config.onSyncSuccess) config.onSyncSuccess(item);
+      console.log(`[NovixoSync] Item [${item.id}] synced ✓`);
+    } else {
+      throw new Error("syncHandler returned false");
+    }
+  } catch (err) {
+    await markFailed(item.id);
+    notifyQueueChange();
+    if (config.onSyncFailure) config.onSyncFailure(item, err);
+    console.warn(`[NovixoSync] Item [${item.id}] failed:`, err.message);
+  }
+}
+
+// ─────────────────────────────────────────────
+// INTERNAL: Retry sweep (runs while online)
+// ─────────────────────────────────────────────
+
 function startRetrySweep() {
   if (retryTimer) return; // Already running
 
@@ -166,9 +187,6 @@ function startRetrySweep() {
   }, config.retryDelay);
 }
 
-/**
- * Stop the retry sweep
- */
 function stopRetrySweep() {
   if (retryTimer) {
     clearInterval(retryTimer);
@@ -176,21 +194,23 @@ function stopRetrySweep() {
   }
 }
 
-/**
- * Notify developer of queue size changes
- */
+// ─────────────────────────────────────────────
+// INTERNAL: Notify developer of queue changes
+// ─────────────────────────────────────────────
+
 function notifyQueueChange() {
   if (config.onQueueChange) {
     config.onQueueChange(queueSize());
   }
 }
 
-/**
- * Teardown — useful for testing or cleanup
- */
+// ─────────────────────────────────────────────
+// PUBLIC: Teardown
+// ─────────────────────────────────────────────
+
 export function destroy() {
   stopRetrySweep();
   initialized = false;
   config = { ...DEFAULT_CONFIG };
   console.log("[NovixoSync] Core destroyed.");
-  }
+                       }
