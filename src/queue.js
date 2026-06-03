@@ -1,34 +1,37 @@
 /**
- * queue.js — Novixo Sync
- * Stores offline actions when network is unavailable.
- * Supports: messages, requests, updates
+ * queue.js — Novixo Sync (Phase 1.4)
+ * ─────────────────────────────────────
+ * Updated to use async IndexedDB storage instead of localStorage.
+ * Logic is identical to Phase 1.3 — only storage calls are now awaited.
  */
+
+import { saveLocal, loadLocal } from "./storage.js";
 
 const STORAGE_KEY = "novixo_queue";
 
 let queue = [];
 
 /**
- * Load persisted queue from localStorage (if available)
+ * Load persisted queue from IndexedDB
+ * Call once during SDK init.
  */
-export function loadQueue() {
+export async function loadQueue() {
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      queue = JSON.parse(saved);
-    }
+    const saved = await loadLocal(STORAGE_KEY, []);
+    queue = Array.isArray(saved) ? saved : [];
+    console.log(`[NovixoSync] Queue loaded from IndexedDB — ${queue.length} item(s).`);
   } catch (e) {
-    console.warn("[NovixoSync] Could not load queue from storage:", e);
+    console.warn("[NovixoSync] Could not load queue from IndexedDB:", e);
     queue = [];
   }
 }
 
 /**
- * Persist queue to localStorage
+ * Persist current queue to IndexedDB
  */
-function persistQueue() {
+async function persistQueue() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(queue));
+    await saveLocal(STORAGE_KEY, queue);
   } catch (e) {
     console.warn("[NovixoSync] Could not persist queue:", e);
   }
@@ -36,9 +39,10 @@ function persistQueue() {
 
 /**
  * Add an item to the offline queue
- * @param {Object} item - { type, payload, timestamp, id }
+ * @param {Object} item - { type, payload, timestamp?, id? }
+ * @returns {Promise<string>} item ID
  */
-export function addToQueue(item) {
+export async function addToQueue(item) {
   const entry = {
     id: item.id || `novixo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     type: item.type || "generic",
@@ -49,7 +53,7 @@ export function addToQueue(item) {
   };
 
   queue.push(entry);
-  persistQueue();
+  await persistQueue();
 
   console.log(`[NovixoSync] Queued item [${entry.id}] — type: ${entry.type}`);
   return entry.id;
@@ -57,6 +61,7 @@ export function addToQueue(item) {
 
 /**
  * Get all queued items
+ * @returns {Array}
  */
 export function getQueue() {
   return [...queue];
@@ -64,57 +69,62 @@ export function getQueue() {
 
 /**
  * Get only pending items (not yet synced)
+ * @returns {Array}
  */
 export function getPendingItems() {
   return queue.filter((item) => item.status === "pending");
 }
 
 /**
- * Mark an item as synced (remove from queue)
+ * Mark an item as synced and remove it from the queue
  * @param {string} id
+ * @returns {Promise<void>}
  */
-export function markSynced(id) {
+export async function markSynced(id) {
   queue = queue.filter((item) => item.id !== id);
-  persistQueue();
+  await persistQueue();
   console.log(`[NovixoSync] Item [${id}] synced and removed from queue.`);
 }
 
 /**
- * Mark an item as failed and increment retry count
+ * Mark an item as failed and increment its retry count
  * @param {string} id
+ * @returns {Promise<void>}
  */
-export function markFailed(id) {
-  queue = queue.map((item) => {
-    if (item.id === id) {
-      return { ...item, retries: item.retries + 1, status: "failed" };
-    }
-    return item;
-  });
-  persistQueue();
+export async function markFailed(id) {
+  queue = queue.map((item) =>
+    item.id === id
+      ? { ...item, retries: item.retries + 1, status: "failed" }
+      : item
+  );
+  await persistQueue();
 }
 
 /**
- * Reset all failed items back to pending (for retry sweep)
+ * Reset all failed items back to "pending" for the next retry sweep
+ * @returns {Promise<void>}
  */
-export function resetFailed() {
+export async function resetFailed() {
   queue = queue.map((item) =>
     item.status === "failed" ? { ...item, status: "pending" } : item
   );
-  persistQueue();
+  await persistQueue();
 }
 
 /**
  * Clear the entire queue
+ * @returns {Promise<void>}
  */
-export function clearQueue() {
+export async function clearQueue() {
   queue = [];
-  persistQueue();
+  await persistQueue();
   console.log("[NovixoSync] Queue cleared.");
 }
 
 /**
- * Return queue size
+ * Return current queue size
+ * @returns {number}
  */
 export function queueSize() {
   return queue.length;
-  }
+}
