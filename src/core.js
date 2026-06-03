@@ -22,7 +22,7 @@ import {
   onNetworkChange,
 } from "./network.js";
 
-import { isStorageAvailable } from "./storage.js";
+import { isStorageAvailable, initStorage } from "./storage.js";
 
 // ─────────────────────────────────────────────
 // Configuration defaults
@@ -31,6 +31,7 @@ const DEFAULT_CONFIG = {
   retryLimit: 5,        // Max retries per item before giving up
   retryDelay: 3000,     // ms between retry sweeps
   autoSync: true,       // Auto-sync when back online
+  platform: null,       // "web" | "mobile" | null (auto-detect)
   onSyncSuccess: null,  // Callback: (item) => {}
   onSyncFailure: null,  // Callback: (item, error) => {}
   onQueueChange: null,  // Callback: (queueSize) => {}
@@ -63,12 +64,15 @@ export async function init(userConfig = {}) {
     );
   }
 
-  // Check IndexedDB availability
+  // Boot the correct storage adapter (web = IndexedDB, mobile = AsyncStorage)
+  await initStorage(config.platform);
+
+  // Check storage availability
   const storageOk = await isStorageAvailable();
   if (!storageOk) {
-    console.warn("[NovixoSync] IndexedDB not available. Queue won't persist across sessions.");
+    console.warn("[NovixoSync] Storage not available. Queue won't persist across sessions.");
   } else {
-    console.log("[NovixoSync] IndexedDB ready ✓");
+    console.log("[NovixoSync] Storage ready ✓");
   }
 
   // Load any items queued from a previous session
@@ -213,4 +217,4 @@ export function destroy() {
   initialized = false;
   config = { ...DEFAULT_CONFIG };
   console.log("[NovixoSync] Core destroyed.");
-                       }
+  }
