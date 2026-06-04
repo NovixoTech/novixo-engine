@@ -49,3 +49,33 @@
 
 ## [0.1.0] — Phase 1 (pre-release)
 - Offline queue, network detection, auto-retry, IndexedDB
+
+---
+
+## [1.2.0] — Phase 5b — Deduplication Engine
+
+### Added
+- **Deduplication Engine** — prevents duplicate items from entering the queue
+- Three strategies: `STRICT` (type + payload), `TYPE` (type only), `CUSTOM` (your key function)
+- Configurable time window (`windowMs`) — default 5 seconds
+- `onDuplicate` callback — fires when a duplicate is detected
+- `DedupeStrategy` named export
+- `Novixo.getFingerprintCount()` — debug how many fingerprints are active
+- `Novixo.clearFingerprints()` — reset deduplication state
+- Fingerprints automatically released when items sync successfully
+- Timeline events updated to log duplicate drops as `ITEM_SKIPPED`
+- `dedupe: false` config option to disable entirely
+
+---
+
+## [1.3.0] — Phase 5c — Network Flap Protection
+
+### Added
+- **Flap Guard** — prevents sync from firing on unstable, flapping networks
+- Configurable `stabilityMs` — how long network must stay stable before syncing (default 3s)
+- `onFlap` callback — fires every time a flap is detected, with count and history
+- `onStable` callback — fires when network is genuinely stable and sync is safe
+- `Novixo.getFlapStats()` — `{ flapCount, history, isStabilizing, stabilityMs }`
+- `flapGuard: false` config option to disable entirely
+- Timeline now logs flap events and stability confirmations
+- `flapGuardOptions.maxFlaps` — how many flap events to keep in history (default 10)
