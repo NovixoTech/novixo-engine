@@ -1,78 +1,94 @@
 /**
- * index.js — Novixo Sync SDK (Phase 3)
+ * index.js — Novixo Engine (Phase 5a)
  * ──────────────────────────────────────
- * Public entry point.
+ * Public SDK entry point.
  *
- * Usage:
- *   import Novixo, { ConflictStrategy } from "novixo-sync";
+ * New in Phase 5a:
+ *   import Novixo, { Priority, NetworkState, ConflictStrategy, TimelineEvent } from "novixo-engine";
  *
+ * ── TIMELINE USAGE ──
  *   await Novixo.init({
- *     conflictStrategy: ConflictStrategy.CLIENT_WINS,
+ *     timeline: true,  // default: true
  *
- *     syncHandler: async (item) => {
- *       const res = await fetch("/api/sync", {
- *         method: "POST",
- *         body: JSON.stringify(item),
- *       });
- *
- *       // If server detected a conflict, return the conflict object
- *       if (res.status === 409) {
- *         const serverItem = await res.json();
- *         return { conflict: true, serverItem };
- *       }
- *
- *       return res.ok;
+ *     timelineOptions: {
+ *       maxEntries: 200,
+ *       onEntry: (entry) => {
+ *         // fires on every new timeline entry
+ *         console.log(`[${entry.time}] ${entry.event} — ${entry.message}`);
+ *       },
  *     },
- *
- *     onConflictResolved: (resolvedItem, strategy) => {
- *       console.log(`Conflict resolved via ${strategy}:`, resolvedItem);
- *     },
+ *     syncHandler: async (item) => { ... },
  *   });
+ *
+ *   // Read the timeline anytime
+ *   const log = Novixo.getTimeline();
+ *   const issues = Novixo.getTimelineIssues();
+ *   const summary = Novixo.getTimelineSummary();
+ *   const itemLog = Novixo.getItemTimeline("novixo_123_abc");
+ *
+ *   // Export for bug reports
+ *   const json = Novixo.exportTimeline();
+ *
+ *   // Clear
+ *   Novixo.clearTimeline();
  */
 
 import { init, send, syncNow, destroy } from "./src/core.js";
 import { getQueue, clearQueue, queueSize } from "./src/queue.js";
-import { isOnline } from "./src/network.js";
-export { ConflictStrategy } from "./src/conflict.js";
-
-const Novixo = {
-  /**
-   * Initialize the SDK
-   * @param {Object} config
-   * @param {Function} config.syncHandler        - async (item) => true | false | { conflict, serverItem }
-   * @param {string}   config.conflictStrategy   - ConflictStrategy.LAST_WRITE_WINS (default)
-   * @param {Function} config.onConflict         - required if strategy = MANUAL
-   * @param {Function} config.onConflictResolved - (resolvedItem, strategy) => {}
-   * @param {string}   config.platform           - "web" | "mobile" | null
-   * @param {number}   config.retryLimit         - default: 5
-   * @param {number}   config.retryDelay         - ms, default: 3000
-   * @param {boolean}  config.autoSync           - default: true
-   * @param {Function} config.onSyncSuccess
-   * @param {Function} config.onSyncFailure
-   * @param {Function} config.onQueueChange
-   */
-  init,
-
-  /** Queue data for sending (immediate if online, stored if offline) */
-  send,
-
-  /** Manually trigger a sync of all pending queue items */
-  syncNow,
-
-  /** Current network status */
+import {
   isOnline,
+  getNetworkState,
+  NetworkState,
+  forceNetworkState,
+} from "./src/network.js";
+import {
+  getTimeline,
+  getItemTimeline,
+  getByEvent,
+  getByLevel,
+  getIssues,
+  getTimelineSummary,
+  clearTimeline,
+  exportTimeline,
+  onTimelineEntry,
+  TimelineEvent,
+  LogLevel,
+} from "./src/timeline.js";
 
-  /** All items currently in the queue */
+// Named exports
+export { Priority }           from "./src/priority-queue.js";
+export { NetworkState }       from "./src/network-quality.js";
+export { ConflictStrategy }   from "./src/conflict.js";
+export { TimelineEvent, LogLevel } from "./src/timeline.js";
+
+// Default export
+const Novixo = {
+  // ── Core ──
+  init,
+  send,
+  syncNow,
+  destroy,
+
+  // ── Network ──
+  isOnline,
+  getNetworkState,
+  forceNetworkState,
+
+  // ── Queue ──
   getQueue,
-
-  /** Current queue size */
   queueSize,
-
-  /** Clear the entire queue */
   clearQueue,
 
-  /** Teardown the SDK */
-  destroy,
+  // ── Timeline (Phase 5a) ──
+  getTimeline,
+  getItemTimeline,
+  getTimelineByEvent: getByEvent,
+  getTimelineByLevel: getByLevel,
+  getTimelineIssues: getIssues,
+  getTimelineSummary,
+  clearTimeline,
+  exportTimeline,
+  onTimelineEntry,
 };
 
 export default Novixo;
