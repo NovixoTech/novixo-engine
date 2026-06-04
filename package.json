@@ -1,10 +1,27 @@
 {
-  "name": "novixo-sync",
-  "version": "0.1.0",
-  "description": "Offline-first sync engine for web and mobile apps. Queue actions when offline, sync automatically when back online.",
+  "name": "novixo-engine",
+  "version": "1.0.0",
+  "description": "An adaptive network intelligence engine for modern applications. Offline-first queuing, 4-state network awareness, priority sync, and conflict resolution.",
   "main": "index.js",
+  "module": "index.js",
   "type": "module",
+  "exports": {
+    ".": {
+      "import": "./index.js",
+      "require": "./index.cjs"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.cjs",
+    "src/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "build": "node scripts/build-cjs.js",
+    "prepublishOnly": "npm run build",
     "test": "node test/basic.test.js"
   },
   "keywords": [
@@ -13,12 +30,36 @@
     "queue",
     "offline-first",
     "network",
-    "sdk"
+    "sdk",
+    "react-native",
+    "expo",
+    "network-intelligence",
+    "priority-queue",
+    "adaptive-sync",
+    "novixo"
   ],
-  "author": "Fatimah — Novixo",
+  "author": {
+    "name": "Novixo",
+    "url": "https://github.com/YOUR_USERNAME"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/novixo-sync"
+    "url": "https://github.com/YOUR_USERNAME/novixo-engine.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_USERNAME/novixo-engine/issues"
+  },
+  "homepage": "https://github.com/YOUR_USERNAME/novixo-engine#readme",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "peerDependencies": {
+    "@react-native-async-storage/async-storage": ">=1.18.0"
+  },
+  "peerDependenciesMeta": {
+    "@react-native-async-storage/async-storage": {
+      "optional": true
+    }
   }
 }
