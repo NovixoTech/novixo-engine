@@ -1,179 +1,198 @@
-# Novixo Sync
+# novixo-engine
 
-> **Offline-first sync engine for web and mobile apps.**
-> Queue offline. Sync smart. Resolve conflicts automatically.
+> **An adaptive network intelligence engine for modern applications.**
+
+[![npm version](https://img.shields.io/npm/v/novixo-engine.svg)](https://www.npmjs.com/package/novixo-engine)
+[![license](https://img.shields.io/npm/l/novixo-engine.svg)](./LICENSE)
 
 ---
 
-## Project Structure
+## The problem
 
+Most apps treat the network as binary — online or offline.
+
+But real-world networks are unpredictable. They degrade, flap, drop packets, and recover. On mobile especially, "connected" doesn't mean "working."
+
+**Novixo Engine adapts to 4 real-world network states automatically.**
+
+---
+
+## Install
+
+```bash
+npm install novixo-engine
 ```
-novixo-sync/
-  ├── src/
-  │   ├── adapters/
-  │   │   ├── indexeddb.adapter.js        → Web (IndexedDB)
-  │   │   └── asyncstorage.adapter.js     → Mobile (AsyncStorage)
-  │   ├── storage.js      → Smart adapter router
-  │   ├── queue.js        → Offline action queue
-  │   ├── network.js      → Online/offline detection
-  │   ├── core.js         → Brain: store, send, retry, resolve
-  │   └── conflict.js     → Conflict resolution engine (Phase 3 ✅)
-  ├── demo/
-  │   └── NovixoDemo.jsx  → Expo demo screen
-  ├── index.js            → Public SDK entry point
-  └── package.json
+
+For React Native / Expo:
+```bash
+expo install @react-native-async-storage/async-storage
 ```
 
 ---
 
-## Conflict Resolution (Phase 3)
+## Quick start
 
-A conflict happens when the same data was changed in two places while one side was offline.
-
-### The 4 strategies
-
-| Strategy | Who wins | Best for |
-|---|---|---|
-| `LAST_WRITE_WINS` | Newest timestamp | Most apps (default) |
-| `CLIENT_WINS` | Local / offline version | Personal data, notes, settings |
-| `SERVER_WINS` | Server version | Shared data, collaborative docs |
-| `MANUAL` | You decide via callback | Complex business logic |
-
----
-
-## Quick Start
-
-### Basic (Last Write Wins — default)
 ```js
-import Novixo from "novixo-sync";
+import Novixo, { Priority } from "novixo-engine";
 
 await Novixo.init({
   syncHandler: async (item) => {
-    const res = await fetch("/api/sync", {
+    const res = await fetch("https://your-api.com/sync", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(item),
     });
+    return res.ok;
+  },
 
-    // Signal a conflict if server returns 409
+  onNetworkStateChange: (newState, oldState) => {
+    console.log(`Network: ${oldState} → ${newState}`);
+  },
+
+  onSyncSuccess: (item) => console.log("✅ Synced:", item.id),
+  onQueueChange: (size) => console.log("📦 Queue:", size),
+});
+
+// Payments — always sync first
+await Novixo.send({ type: "payment", payload: { amount: 5000 } }, Priority.HIGH);
+
+// Messages — default priority
+await Novixo.send({ type: "message", payload: { text: "Hello" } });
+
+// Analytics — sync last, skip on weak networks
+await Novixo.send({ type: "analytics", payload: { event: "tap" } }, Priority.LOW);
+```
+
+---
+
+## 4-State network intelligence
+
+| State | Meaning | What Novixo does |
+|---|---|---|
+| `STABLE` | Fast, reliable | Send immediately |
+| `DEGRADED` | Slow or inconsistent | Batch into groups |
+| `UNSTABLE` | Frequent failures | HIGH priority only |
+| `OFFLINE` | No connection | Store locally |
+
+```js
+import { NetworkState } from "novixo-engine";
+
+console.log(Novixo.getNetworkState());
+// "STABLE" | "DEGRADED" | "UNSTABLE" | "OFFLINE"
+```
+
+---
+
+## Priority system
+
+```js
+import { Priority } from "novixo-engine";
+
+// 🔴 HIGH — payments, auth, critical actions
+await Novixo.send(data, Priority.HIGH);
+
+// 🟡 MEDIUM — messages, updates (default)
+await Novixo.send(data);
+
+// 🟢 LOW — analytics, logs (last to sync, held on weak networks)
+await Novixo.send(data, Priority.LOW);
+```
+
+---
+
+## Batch sync
+
+On degraded or unstable networks, Novixo automatically batches items to reduce API calls. Provide a `batchSyncHandler` to handle them:
+
+```js
+await Novixo.init({
+  batchSyncHandler: async (items) => {
+    const res = await fetch("/api/sync/batch", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    });
+    const { results } = await res.json();
+    return results; // [true, false, true, ...]
+  },
+  syncHandler: async (item) => { ... }, // single-item fallback
+});
+```
+
+---
+
+## Conflict resolution
+
+```js
+import { ConflictStrategy } from "novixo-engine";
+
+await Novixo.init({
+  conflictStrategy: ConflictStrategy.CLIENT_WINS,
+  // Options: LAST_WRITE_WINS (default) | CLIENT_WINS | SERVER_WINS | MANUAL
+
+  syncHandler: async (item) => {
+    const res = await fetch("/api/sync", { ... });
     if (res.status === 409) {
-      const serverItem = await res.json();
-      return { conflict: true, serverItem };
+      return { conflict: true, serverItem: await res.json() };
     }
-
     return res.ok;
   },
 });
 ```
 
-### Choose a strategy
-```js
-import Novixo, { ConflictStrategy } from "novixo-sync";
+---
 
-await Novixo.init({
-  conflictStrategy: ConflictStrategy.CLIENT_WINS,
+## React Native / Expo
 
-  syncHandler: async (item) => { ... },
-
-  onConflictResolved: (resolvedItem, strategy) => {
-    console.log(`Resolved via ${strategy}:`, resolvedItem);
-  },
-});
-```
-
-### Manual resolution (you decide)
 ```js
 await Novixo.init({
-  conflictStrategy: ConflictStrategy.MANUAL,
-
-  syncHandler: async (item) => { ... },
-
-  // Your custom resolver — gets both versions, you return the winner
-  onConflict: async (clientItem, serverItem) => {
-    // Example: merge both payloads
-    return {
-      ...clientItem,
-      payload: { ...serverItem.payload, ...clientItem.payload },
-    };
-  },
-});
-```
-
-### Mobile (React Native / Expo)
-```js
-await Novixo.init({
-  platform: "mobile",
-  conflictStrategy: ConflictStrategy.SERVER_WINS,
+  platform: "mobile",  // Uses AsyncStorage instead of IndexedDB
   syncHandler: async (item) => { ... },
 });
 ```
 
 ---
 
-## How your server signals a conflict
-
-Your backend should return HTTP `409 Conflict` with the server's version of the item:
+## Testing
 
 ```js
-// Express example
-app.post("/api/sync", async (req, res) => {
-  const incoming = req.body;
-  const existing = await db.find(incoming.id);
+import { NetworkState } from "novixo-engine";
 
-  if (existing && existing.timestamp > incoming.timestamp) {
-    // Conflict — server has newer data
-    return res.status(409).json(existing);
-  }
-
-  await db.save(incoming);
-  res.status(200).json({ ok: true });
-});
+// Simulate different network conditions
+Novixo.forceNetworkState(NetworkState.DEGRADED);
+Novixo.forceNetworkState(NetworkState.OFFLINE);
+Novixo.forceNetworkState(NetworkState.STABLE);
 ```
 
 ---
 
-## API Reference
+## Full API
 
 | Method | Description |
 |---|---|
-| `await Novixo.init(config)` | Initialize SDK |
-| `await Novixo.send(data)` | Queue item (sends immediately if online) |
-| `await Novixo.syncNow()` | Manually trigger queue sync |
-| `Novixo.isOnline()` | Current network status |
+| `await Novixo.init(config)` | Initialize the engine |
+| `await Novixo.send(data, priority?)` | Queue item with optional priority |
+| `await Novixo.syncNow()` | Manually trigger sync |
+| `Novixo.getNetworkState()` | Current 4-state network status |
+| `Novixo.isOnline()` | True if not OFFLINE |
+| `Novixo.forceNetworkState(state)` | Override state (for testing) |
 | `Novixo.getQueue()` | All queued items |
-| `Novixo.queueSize()` | Queue size |
-| `await Novixo.clearQueue()` | Clear all queued items |
-| `Novixo.destroy()` | Teardown SDK |
-
-### init() config options (Phase 3)
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `syncHandler` | `async fn` | **required** | Returns `true`, `false`, or `{ conflict, serverItem }` |
-| `conflictStrategy` | `string` | `LAST_WRITE_WINS` | One of the 4 strategies |
-| `onConflict` | `async fn` | `null` | Required if strategy = `MANUAL` |
-| `onConflictResolved` | `fn` | `null` | Called after every conflict resolution |
-| `platform` | `string` | auto | `"web"` or `"mobile"` |
-| `retryLimit` | `number` | `5` | Max retries per item |
-| `retryDelay` | `number` | `3000` | ms between retry sweeps |
-| `autoSync` | `boolean` | `true` | Auto-sync when back online |
-| `onSyncSuccess` | `fn` | `null` | Called on successful sync |
-| `onSyncFailure` | `fn` | `null` | Called on failure |
-| `onQueueChange` | `fn` | `null` | Called when queue size changes |
+| `Novixo.queueSize()` | Number of items in queue |
+| `await Novixo.clearQueue()` | Clear all items |
+| `Novixo.destroy()` | Teardown engine |
 
 ---
 
-## Roadmap
+## CDN (no install needed)
 
-- [x] Phase 1.1 — Offline queue engine
-- [x] Phase 1.2 — Network detection
-- [x] Phase 1.3 — Auto-retry + sync sweep
-- [x] Phase 1.4 — IndexedDB support (web)
-- [x] Phase 2   — React Native / Expo adapter
-- [x] Phase 3   — Conflict resolution strategies
-- [ ] Phase 4   — npm package + CDN release
+```html
+<script type="module">
+  import Novixo from "https://unpkg.com/novixo-engine@1.0.0/index.js";
+  await Novixo.init({ ... });
+</script>
+```
 
 ---
 
 ## License
 
-MIT © Novixo
+MIT © [Novixo](https://github.com/YOUR_USERNAME)
