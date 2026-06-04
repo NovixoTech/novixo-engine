@@ -1,77 +1,128 @@
 /**
- * network.js — Novixo Sync
- * Detects online/offline status and fires event callbacks.
+ * network.js — Novixo Sync (Phase 4a)
+ * ──────────────────────────────────────
+ * Network monitor — now integrates 4-state quality detection.
+ *
+ * BACKWARD COMPATIBLE:
+ * All Phase 3 functions still work exactly the same.
+ * Phase 4a adds quality-awareness on top.
  */
 
-const listeners = {
+import {
+  startQualityMonitor,
+  stopQualityMonitor,
+  getNetworkState,
+  onStateChange,
+  NetworkState,
+  isStable,
+  isDegraded,
+  isUnstable,
+  isOffline,
+  canSend,
+  forceNetworkState,
+  getPingHistory,
+} from "./network-quality.js";
+
+// ─────────────────────────────────────────────
+// Re-export everything from network-quality
+// so core.js only needs to import from network.js
+// ─────────────────────────────────────────────
+
+export {
+  getNetworkState,
+  onStateChange,
+  NetworkState,
+  isStable,
+  isDegraded,
+  isUnstable,
+  isOffline,
+  canSend,
+  forceNetworkState,
+  getPingHistory,
+};
+
+// ─────────────────────────────────────────────
+// Legacy listeners (kept from Phase 1–3)
+// ─────────────────────────────────────────────
+
+const legacyListeners = {
   online: [],
   offline: [],
 };
 
-/**
- * Check current network status
- * @returns {boolean}
- */
-export function isOnline() {
-  return typeof navigator !== "undefined" ? navigator.onLine : true;
-}
-
-/**
- * Register a callback for network status changes
- * @param {"online"|"offline"} event
- * @param {Function} callback
- */
-export function onNetworkChange(event, callback) {
-  if (!listeners[event]) {
-    console.warn(`[NovixoSync] Unknown network event: ${event}`);
-    return;
-  }
-  listeners[event].push(callback);
-}
-
-/**
- * Fire all registered callbacks for an event
- * @param {"online"|"offline"} event
- */
-function fireListeners(event) {
-  listeners[event].forEach((cb) => {
-    try {
-      cb();
-    } catch (e) {
+function fireLegacyListeners(event) {
+  legacyListeners[event].forEach((cb) => {
+    try { cb(); } catch (e) {
       console.error(`[NovixoSync] Error in ${event} listener:`, e);
     }
   });
 }
 
 /**
- * Start listening to browser network events
- * Call this once during SDK init.
+ * Register a callback for online/offline transitions.
+ * Still supported from Phase 1.2 — not removed.
+ * @param {"online"|"offline"} event
+ * @param {Function} callback
  */
-export function startNetworkMonitor() {
-  if (typeof window === "undefined") {
-    console.warn("[NovixoSync] No browser window found. Network monitor skipped.");
+export function onNetworkChange(event, callback) {
+  if (!legacyListeners[event]) {
+    console.warn(`[NovixoSync] Unknown network event: ${event}`);
     return;
   }
-
-  window.addEventListener("online", () => {
-    console.log("[NovixoSync] Network restored — online.");
-    fireListeners("online");
-  });
-
-  window.addEventListener("offline", () => {
-    console.log("[NovixoSync] Network lost — offline.");
-    fireListeners("offline");
-  });
-
-  console.log(
-    `[NovixoSync] Network monitor started. Current status: ${isOnline() ? "ONLINE" : "OFFLINE"}`
-  );
+  legacyListeners[event].push(callback);
 }
 
-/**
- * Remove all listeners (useful for cleanup/testing)
- */
 export function clearNetworkListeners() {
-  listeners.online = [];
-  listeners.offline = [];
+  legacyListeners.online = [];
+  legacyListeners.offline = [];
+}
+
+// ─────────────────────────────────────────────
+// Legacy: isOnline() — now maps to !isOffline()
+// ─────────────────────────────────────────────
+
+export function isOnline() {
+  return !isOffline();
+}
+
+// ─────────────────────────────────────────────
+// Start the full network monitor
+// Replaces old startNetworkMonitor()
+// ─────────────────────────────────────────────
+
+/**
+ * Start network monitoring — both quality detection and legacy events.
+ * @param {Object} qualityConfig — optional quality threshold overrides
+ */
+export function startNetworkMonitor(qualityConfig = {}) {
+  // Start the 4-state quality monitor
+  startQualityMonitor(qualityConfig);
+
+  // Bridge quality state changes into legacy online/offline callbacks
+  // so core.js auto-sync on reconnect still works
+  onStateChange((newState, oldState) => {
+    const wasOffline =
+      oldState === NetworkState.OFFLINE || oldState === NetworkState.UNSTABLE;
+    const isNowOnline =
+      newState === NetworkState.STABLE || newState === NetworkState.DEGRADED;
+    const isNowOffline =
+      newState === NetworkState.OFFLINE;
+
+    if (wasOffline && isNowOnline) {
+      console.log("[NovixoSync] Connection restored — firing online callbacks.");
+      fireLegacyListeners("online");
+    }
+
+    if (isNowOffline) {
+      console.log("[NovixoSync] Connection lost — firing offline callbacks.");
+      fireLegacyListeners("offline");
+    }
+  });
+
+  console.log("[NovixoSync] Network monitor started ✓");
+}
+
+export function stopNetworkMonitor() {
+  stopQualityMonitor();
+  clearNetworkListeners();
 }
