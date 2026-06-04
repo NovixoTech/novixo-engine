@@ -1,8 +1,8 @@
 /**
- * core.js — Novixo Sync (Phase 3)
- * ─────────────────────────────────────
- * Brain of Novixo Sync.
- * Phase 3 adds: conflict detection + resolution inside trySyncItem.
+ * core.js — Novixo Engine (Phase 5a)
+ * ──────────────────────────────────────────────────────
+ * Phase 5a adds: Sync Timeline integrated at every key moment.
+ * Every queue, sync, retry, conflict, and network event is now recorded.
  */
 
 import {
@@ -19,6 +19,13 @@ import {
   isOnline,
   startNetworkMonitor,
   onNetworkChange,
+  onStateChange,
+  getNetworkState,
+  NetworkState,
+  isStable,
+  isDegraded,
+  isUnstable,
+  isOffline,
 } from "./network.js";
 
 import { isStorageAvailable, initStorage } from "./storage.js";
@@ -29,27 +36,64 @@ import {
   ConflictStrategy,
 } from "./conflict.js";
 
+import {
+  withPriority,
+  sortByPriority,
+  Priority,
+  describePriority,
+} from "./priority-queue.js";
+
+import {
+  createBatches,
+  getHeldBackIds,
+  describeBatchPlan,
+} from "./batcher.js";
+
+import {
+  initTimeline,
+  record,
+  TimelineEvent,
+  LogLevel,
+} from "./timeline.js";
+
 // ─────────────────────────────────────────────
 // Configuration defaults
 // ─────────────────────────────────────────────
 
 const DEFAULT_CONFIG = {
-  retryLimit: 5,                              // Max retries per item
-  retryDelay: 3000,                           // ms between retry sweeps
-  autoSync: true,                             // Auto-sync on reconnect
-  platform: null,                             // "web" | "mobile" | null
+  platform: null,
+  autoSync: true,
 
-  // ── Conflict Resolution (Phase 3) ──
+  retryLimit: 5,
+  retryDelay: {
+    [NetworkState.STABLE]:   2000,
+    [NetworkState.DEGRADED]: 5000,
+    [NetworkState.UNSTABLE]: 10000,
+    [NetworkState.OFFLINE]:  0,
+  },
+
+  defaultPriority: Priority.MEDIUM,
+  batchConfig: {},
+  qualityConfig: {},
+
+  // Conflict resolution
   conflictStrategy: ConflictStrategy.LAST_WRITE_WINS,
-  onConflict: null,  // Required if strategy = MANUAL
-                     // async (clientItem, serverItem) => resolvedItem
-  onConflictResolved: null, // Callback: (resolvedItem, strategy) => {}
+  onConflict: null,
+  onConflictResolved: null,
 
-  // ── Callbacks ──
-  onSyncSuccess: null,   // (item) => {}
-  onSyncFailure: null,   // (item, error) => {}
-  onQueueChange: null,   // (queueSize) => {}
-  syncHandler: null,     // REQUIRED: async (item) => true | false | { conflict, serverItem }
+  // Timeline (Phase 5a)
+  timeline: true,          // Enable/disable timeline logging
+  timelineOptions: {},     // { maxEntries, onEntry }
+
+  // Callbacks
+  onSyncSuccess: null,
+  onSyncFailure: null,
+  onQueueChange: null,
+  onNetworkStateChange: null,
+
+  // Required
+  syncHandler: null,
+  batchSyncHandler: null,
 };
 
 let config = { ...DEFAULT_CONFIG };
@@ -62,86 +106,258 @@ let initialized = false;
 
 export async function init(userConfig = {}) {
   if (initialized) {
-    console.warn("[NovixoSync] Already initialized.");
+    console.warn("[NovixoEngine] Already initialized.");
     return;
   }
 
   config = { ...DEFAULT_CONFIG, ...userConfig };
 
   if (!config.syncHandler) {
-    console.error("[NovixoSync] No syncHandler provided.");
+    console.error("[NovixoEngine] No syncHandler provided.");
   }
 
-  // Boot storage adapter
-  await initStorage(config.platform);
+  // Init timeline first — so we can log everything from here
+  if (config.timeline) {
+    initTimeline(config.timelineOptions);
+  }
 
+  // Boot storage
+  await initStorage(config.platform);
   const storageOk = await isStorageAvailable();
+
   if (!storageOk) {
-    console.warn("[NovixoSync] Storage not available. Queue won't persist.");
-  } else {
-    console.log("[NovixoSync] Storage ready ✓");
+    console.warn("[NovixoEngine] Storage unavailable.");
   }
 
   // Load persisted queue
   await loadQueue();
 
   // Start network monitor
-  startNetworkMonitor();
+  startNetworkMonitor(config.qualityConfig);
 
-  // Auto-sync on reconnect
-  if (config.autoSync) {
-    onNetworkChange("online", async () => {
-      console.log("[NovixoSync] Back online — starting sync sweep.");
-      await resetFailed();
-      startRetrySweep();
-    });
+  // React to network state changes
+  onStateChange(async (newState, oldState) => {
+    if (config.timeline) {
+      record(
+        TimelineEvent.NETWORK_CHANGED,
+        `Network: ${oldState} → ${newState}`,
+        newState === NetworkState.OFFLINE ? LogLevel.WARN : LogLevel.INFO,
+        { newState, oldState }
+      );
+    }
+
+    if (config.onNetworkStateChange) {
+      config.onNetworkStateChange(newState, oldState);
+    }
+
+    if (config.autoSync) {
+      if (
+        newState === NetworkState.STABLE ||
+        newState === NetworkState.DEGRADED
+      ) {
+        await resetFailed();
+        startRetrySweep();
+      }
+      if (newState === NetworkState.OFFLINE) {
+        stopRetrySweep();
+      }
+    }
+  });
+  initialized = true;
+
+  if (config.timeline) {
+    record(
+      TimelineEvent.ENGINE_INIT,
+      `Engine initialized | platform: ${config.platform ?? "auto"} | queue: ${queueSize()} item(s)`,
+      LogLevel.INFO,
+      {
+        platform: config.platform,
+        conflictStrategy: config.conflictStrategy,
+        queueSize: queueSize(),
+      }
+    );
   }
 
-  initialized = true;
   console.log(
-    `[NovixoSync] Core initialized ✓ | Strategy: ${config.conflictStrategy} | Queue: ${queueSize()}`
+    `[NovixoEngine] Initialized ✓ | Strategy: ${config.conflictStrategy} | Queue: ${queueSize()}`
   );
 }
 
 // ─────────────────────────────────────────────
-// PUBLIC: Send / queue an item
+// PUBLIC: Send
 // ─────────────────────────────────────────────
 
-export async function send(data) {
-  const id = await addToQueue(data);
+export async function send(data, priority = config.defaultPriority) {
+  const enriched = withPriority(data, priority);
+  const id = await addToQueue(enriched);
   notifyQueueChange();
 
-  if (isOnline() && config.syncHandler) {
-    await trySyncItem({ id, ...data, retries: 0, status: "pending" });
-  } else {
-    console.log(`[NovixoSync] Offline — item [${id}] queued.`);
+  const state = getNetworkState();
+
+  if (config.timeline) {
+    record(
+      TimelineEvent.ITEM_QUEUED,
+      `Item queued — ${describePriority(priority)} — network: ${state}`,
+      LogLevel.INFO,
+      { itemId: id, priority, type: data.type, networkState: state }
+    );
   }
 
+  if (state === NetworkState.OFFLINE) {
+    return id;
+  }
+
+  if (state === NetworkState.UNSTABLE && priority !== Priority.HIGH) {
+    if (config.timeline) {
+      record(
+        TimelineEvent.ITEM_SKIPPED,
+        `Item held — UNSTABLE network, not HIGH priority`,
+        LogLevel.WARN,
+        { itemId: id, priority, networkState: state }
+      );
+    }
+    return id;
+  }
+
+  await trySyncItem({ id, ...enriched, retries: 0, status: "pending" });
   return id;
 }
 
 // ─────────────────────────────────────────────
-// PUBLIC: Manual sync trigger
+// PUBLIC: Manual sync
 // ─────────────────────────────────────────────
 
 export async function syncNow() {
-  if (!isOnline()) {
-    console.log("[NovixoSync] Cannot sync — offline.");
+  const state = getNetworkState();
+
+  if (state === NetworkState.OFFLINE) {
+    if (config.timeline) {
+      record(
+        TimelineEvent.SYNC_STARTED,
+        "Sync attempted — offline, aborted",
+        LogLevel.WARN,
+        { networkState: state }
+      );
+    }
     return;
   }
 
   const pending = getPendingItems();
+  if (pending.length === 0) return;
 
-  if (pending.length === 0) {
-    console.log("[NovixoSync] Nothing to sync.");
-    return;
+  if (config.timeline) {
+    record(
+      TimelineEvent.SYNC_STARTED,
+      `Sync started — ${pending.length} item(s) pending — network: ${state}`,
+      LogLevel.INFO,
+      { count: pending.length, networkState: state }
+    );
   }
 
-  console.log(`[NovixoSync] Syncing ${pending.length} item(s)...`);
+  const batches = createBatches(pending, state, config.batchConfig);
+  describeBatchPlan(batches, state);
 
-  for (const item of pending) {
+  const heldBack = getHeldBackIds(pending, batches);
+  if (heldBack.length > 0 && config.timeline) {
+    record(
+      TimelineEvent.ITEM_SKIPPED,
+      `${heldBack.length} item(s) held — network too weak`,
+      LogLevel.WARN,
+      { heldBackIds: heldBack, networkState: state }
+    );
+  }
+
+  if (config.batchSyncHandler && batches.length > 0) {
+    await syncBatches(batches);
+  } else {
+    await syncItemByItem(batches);
+  }
+
+  if (config.timeline) {
+    record(
+      TimelineEvent.SYNC_COMPLETE,
+      `Sync complete`,
+      LogLevel.SUCCESS,
+      { networkState: state }
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// INTERNAL: Batch sync
+// ─────────────────────────────────────────────
+
+async function syncBatches(batches) {
+  for (const batch of batches) {
+    if (batch.length === 0) continue;
+
+    try {
+      const results = await config.batchSyncHandler(batch);
+
+      batch.forEach(async (item, i) => {
+        const success = Array.isArray(results) ? results[i] : results;
+        if (success) {
+          await markSynced(item.id);
+          if (config.onSyncSuccess) config.onSyncSuccess(item);
+          if (config.timeline) {
+            record(
+              TimelineEvent.ITEM_SYNCED,
+              `Batch item synced`,
+              LogLevel.SUCCESS,
+              { itemId: item.id, priority: item.priority }
+            );
+          }
+        } else {
+          await markFailed(item.id);
+          if (config.onSyncFailure) config.onSyncFailure(item, new Error("Batch item failed"));
+          if (config.timeline) {
+            record(
+              TimelineEvent.ITEM_FAILED,
+              `Batch item failed`,
+              LogLevel.ERROR,
+              { itemId: item.id, priority: item.priority }
+            );
+          }
+        }
+      });
+
+      notifyQueueChange();
+    } catch (err) {
+      for (const item of batch) {
+        await markFailed(item.id);
+        if (config.onSyncFailure) config.onSyncFailure(item, err);
+        if (config.timeline) {
+          record(
+            TimelineEvent.ITEM_FAILED,
+            `Batch sync threw: ${err.message}`,
+            LogLevel.ERROR,
+            { itemId: item.id }
+          );
+        }
+      }
+      notifyQueueChange();
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
+// INTERNAL: Item-by-item sync
+// ─────────────────────────────────────────────
+
+async function syncItemByItem(batches) {
+  const items = batches.flat();
+
+  for (const item of items) {
     if (item.retries >= config.retryLimit) {
-      console.warn(`[NovixoSync] Item [${item.id}] exceeded retry limit. Skipping.`);
+      if (config.timeline) {
+        record(
+          TimelineEvent.ITEM_SKIPPED,
+          `Retry limit reached (${config.retryLimit}) — item skipped`,
+          LogLevel.ERROR,
+          { itemId: item.id, retries: item.retries }
+        );
+      }
+      console.warn(`[NovixoEngine] Item [${item.id}] exceeded retry limit.`);
       continue;
     }
     await trySyncItem(item);
@@ -150,21 +366,32 @@ export async function syncNow() {
 
 // ─────────────────────────────────────────────
 // INTERNAL: Try to sync one item
-// Phase 3: now handles conflict responses
 // ─────────────────────────────────────────────
 
 async function trySyncItem(item) {
+  // Log retry if this isn't the first attempt
+  if (item.retries > 0 && config.timeline) {
+    record(
+      TimelineEvent.ITEM_RETRY,
+      `Retry attempt ${item.retries} for item`,
+      LogLevel.WARN,
+      { itemId: item.id, retries: item.retries, priority: item.priority }
+    );
+  }
+
   try {
-    // Call the developer's sync function
-    // It can return:
-    //   true                              → success
-    //   false                             → failure, retry later
-    //   { conflict: true, serverItem: {} } → conflict detected
     const response = await config.syncHandler(item);
 
-    // ── CONFLICT DETECTED ──
+    // ── CONFLICT ──
     if (isConflict(response)) {
-      console.log(`[NovixoSync] Conflict detected for item [${item.id}]`);
+      if (config.timeline) {
+        record(
+          TimelineEvent.CONFLICT_DETECTED,
+          `Conflict detected — resolving via ${config.conflictStrategy}`,
+          LogLevel.WARN,
+          { itemId: item.id, strategy: config.conflictStrategy }
+        );
+      }
 
       const resolved = await resolveConflict(
         item,
@@ -173,25 +400,28 @@ async function trySyncItem(item) {
         config.onConflict
       );
 
-      // Notify developer of resolution
-      if (config.onConflictResolved) {
-        config.onConflictResolved(resolved, config.conflictStrategy);
+      if (config.onConflictResolved) config.onConflictResolved(resolved, config.conflictStrategy);
+
+      if (config.timeline) {
+        record(
+          TimelineEvent.CONFLICT_RESOLVED,
+          `Conflict resolved — ${resolved.id === item.id ? "client" : "server"} version kept`,
+          LogLevel.INFO,
+          {
+            itemId: item.id,
+            winner: resolved.id === item.id ? "client" : "server",
+            strategy: config.conflictStrategy,
+          }
+        );
       }
 
-      // Mark original as synced — the resolved version is the truth now
       await markSynced(item.id);
       notifyQueueChange();
 
-      // If client won, re-queue the resolved item for a final push to server
       if (resolved.id === item.id) {
-        console.log(`[NovixoSync] Client version won — re-queuing resolved item [${item.id}]`);
-        await addToQueue({ ...resolved, id: undefined }); // New ID, fresh queue entry
+        await addToQueue({ ...resolved, id: undefined });
         notifyQueueChange();
-      } else {
-        // Server won — nothing more to push
-        console.log(`[NovixoSync] Server version accepted for item [${item.id}]`);
       }
-
       return;
     }
 
@@ -200,46 +430,64 @@ async function trySyncItem(item) {
       await markSynced(item.id);
       notifyQueueChange();
       if (config.onSyncSuccess) config.onSyncSuccess(item);
-      console.log(`[NovixoSync] Item [${item.id}] synced ✓`);
+
+      if (config.timeline) {
+        record(
+          TimelineEvent.ITEM_SYNCED,
+          `Synced successfully — ${describePriority(item.priority)}`,
+          LogLevel.SUCCESS,
+          { itemId: item.id, priority: item.priority, type: item.type }
+        );
+      }
       return;
     }
 
-    // ── FAILURE (returned false) ──
     throw new Error("syncHandler returned false");
 
   } catch (err) {
     await markFailed(item.id);
     notifyQueueChange();
     if (config.onSyncFailure) config.onSyncFailure(item, err);
-    console.warn(`[NovixoSync] Item [${item.id}] failed:`, err.message);
-  }
-}
 
+    if (config.timeline) {
+      record(
+        TimelineEvent.ITEM_FAILED,
+        `Sync failed — ${err.message}`,
+        LogLevel.ERROR,
+        { itemId: item.id, priority: item.priority, error: err.message }
+      );
+    }
+  }
+  }
 // ─────────────────────────────────────────────
-// INTERNAL: Retry sweep
+// INTERNAL: Retry sweep (adaptive delay)
 // ─────────────────────────────────────────────
 
 function startRetrySweep() {
   if (retryTimer) return;
 
-  retryTimer = setInterval(async () => {
-    if (!isOnline() || getPendingItems().length === 0) {
-      stopRetrySweep();
-      return;
+  const scheduleNext = async () => {
+    if (isOffline()) { stopRetrySweep(); return; }
+    if (getPendingItems().length > 0) await syncNow();
+
+    const delay = config.retryDelay[getNetworkState()] ?? 5000;
+    if (delay > 0 && getPendingItems().length > 0) {
+      retryTimer = setTimeout(scheduleNext, delay);
+    } else {
+      retryTimer = null;
     }
-    await syncNow();
-  }, config.retryDelay);
+  };
+
+  const delay = config.retryDelay[getNetworkState()] ?? 5000;
+  retryTimer = setTimeout(scheduleNext, delay);
 }
 
 function stopRetrySweep() {
-  if (retryTimer) {
-    clearInterval(retryTimer);
-    retryTimer = null;
-  }
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
 }
 
 // ─────────────────────────────────────────────
-// INTERNAL: Notify developer of queue changes
+// INTERNAL: Queue change notification
 // ─────────────────────────────────────────────
 
 function notifyQueueChange() {
@@ -252,7 +500,16 @@ function notifyQueueChange() {
 
 export function destroy() {
   stopRetrySweep();
+
+  if (config.timeline) {
+    record(
+      TimelineEvent.ENGINE_DESTROYED,
+      "Engine destroyed",
+      LogLevel.INFO
+    );
+  }
+
   initialized = false;
   config = { ...DEFAULT_CONFIG };
-  console.log("[NovixoSync] Core destroyed.");
-  }
+  console.log("[NovixoEngine] Destroyed.");
+}
