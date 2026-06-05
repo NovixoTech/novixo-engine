@@ -1,42 +1,30 @@
 /**
- * index.js — Novixo Engine (Phase 5c)
- * ──────────────────────────────────────
- * Public SDK entry point.
+ * index.js — Novixo Engine (Phase 6) — FINAL PUBLIC API
+ * ──────────────────────────────────────────────────────
  *
- * New in Phase 5c — Flap Guard:
- *
- *   await Novixo.init({
- *     flapGuard: true,           // default: true
- *     flapGuardOptions: {
- *       stabilityMs: 3000,       // wait 3s of stable network before syncing
- *     },
- *     onFlap: (count, history) => {
- *       console.log(`Flap #${count} detected`);
- *     },
- *     onStable: () => {
- *       console.log("Network is genuinely stable — syncing now");
- *     },
- *     syncHandler: async (item) => { ... },
- *   });
- *
- *   // Check flap stats anytime
- *   const stats = Novixo.getFlapStats();
- *   // { flapCount, history, isStabilizing, stabilityMs }
+ * import Novixo, {
+ *   Priority, NetworkState, ConflictStrategy,
+ *   DedupeStrategy, SafeModeState,
+ *   TimelineEvent, LogLevel,
+ * } from "novixo-engine";
  */
 
-import { init, send, syncNow, destroy, getFlapStats_ } from "./src/core.js";
-import { getQueue, clearQueue, queueSize }              from "./src/queue.js";
 import {
-  isOnline, getNetworkState, NetworkState, forceNetworkState,
-} from "./src/network.js";
+  init, send, syncNow, destroy,
+  sendOptimistic,
+  cancelItem, updateItem, hasItem, getItem,
+  getFlapStats_, getSafeModeStats_, isInSafeMode_,
+} from "./src/core.js";
+
+import { getQueue, clearQueue, queueSize } from "./src/queue.js";
+import { isOnline, getNetworkState, NetworkState, forceNetworkState } from "./src/network.js";
 import {
   getTimeline, getItemTimeline, getByEvent, getByLevel,
   getIssues, getTimelineSummary, clearTimeline,
   exportTimeline, onTimelineEntry, TimelineEvent, LogLevel,
 } from "./src/timeline.js";
-import {
-  getFingerprintCount, clearFingerprints, DedupeStrategy,
-} from "./src/deduplication.js";
+import { getFingerprintCount, clearFingerprints, DedupeStrategy } from "./src/deduplication.js";
+import { getPendingOptimisticCount } from "./src/optimistic.js";
 
 // Named exports
 export { Priority }                from "./src/priority-queue.js";
@@ -44,26 +32,36 @@ export { NetworkState }            from "./src/network-quality.js";
 export { ConflictStrategy }        from "./src/conflict.js";
 export { TimelineEvent, LogLevel } from "./src/timeline.js";
 export { DedupeStrategy }          from "./src/deduplication.js";
+export { SafeModeState }           from "./src/safe-mode.js";
 
-// Default export
 const Novixo = {
-  // ── Core ──
+  // ── Core ──────────────────────────────────────────────
   init,
   send,
   syncNow,
   destroy,
 
-  // ── Network ──
+  // ── Network ───────────────────────────────────────────
   isOnline,
   getNetworkState,
   forceNetworkState,
 
-  // ── Queue ──
+  // ── Queue ─────────────────────────────────────────────
   getQueue,
   queueSize,
   clearQueue,
 
-  // ── Timeline (Phase 5a) ──
+  // ── Queue management (Phase 6d) ───────────────────────
+  cancelItem,
+  updateItem,
+  hasItem,
+  getItem,
+
+  // ── Optimistic UI (Phase 6e) ──────────────────────────
+  sendOptimistic,
+  getPendingOptimisticCount,
+
+  // ── Timeline (Phase 5a) ───────────────────────────────
   getTimeline,
   getItemTimeline,
   getTimelineByEvent:  getByEvent,
@@ -74,12 +72,16 @@ const Novixo = {
   exportTimeline,
   onTimelineEntry,
 
-  // ── Deduplication (Phase 5b) ──
+  // ── Deduplication (Phase 5b) ──────────────────────────
   getFingerprintCount,
   clearFingerprints,
 
-  // ── Flap Guard (Phase 5c) ──
+  // ── Flap guard (Phase 5c) ─────────────────────────────
   getFlapStats: getFlapStats_,
+
+  // ── Safe mode (Phase 5d) ──────────────────────────────
+  isInSafeMode:     isInSafeMode_,
+  getSafeModeStats: getSafeModeStats_,
 };
 
 export default Novixo;
