@@ -79,3 +79,73 @@
 - `flapGuard: false` config option to disable entirely
 - Timeline now logs flap events and stability confirmations
 - `flapGuardOptions.maxFlaps` — how many flap events to keep in history (default 10)
+
+---
+
+## [1.4.0] — Phase 5d — Safe Mode System — COMPLETE
+
+### Added
+- **Safe Mode** — auto-activates when failure rate exceeds threshold
+- Rolling window failure tracking (default: last 10 attempts)
+- `enterThreshold` — failure rate to enter safe mode (default: 60%)
+- `exitThreshold` — failure rate to exit safe mode (default: 30%)
+- `retryMultiplier` — retry delays multiplied in safe mode (default: 3x)
+- `onSafeMode` callback — fires when safe mode activates, with full stats
+- `onSafeModeExit` callback — fires when safe mode recovers
+- `Novixo.isInSafeMode()` — boolean check
+- `Novixo.getSafeModeStats()` — `{ state, failureRate, totalSynced, totalFailed, ... }`
+- `SafeModeState` named export (`NORMAL` | `SAFE_MODE`)
+- `safeMode: false` config option to disable
+- In safe mode: only HIGH priority items sync
+- In safe mode: batch sync disabled — careful one-by-one only
+- In safe mode: retry delays multiplied automatically
+- Auto-recovery when failure rate drops below exitThreshold
+
+### Phase 5 Complete
+All Phase 5 modules now active:
+- 5a: Sync Timeline
+- 5b: Deduplication Engine
+- 5c: Network Flap Protection
+- 5d: Safe Mode System
+
+---
+
+## [2.0.0] — Phase 6 — Enterprise Layer
+
+### Added
+
+**6a — TypeScript Definitions**
+- Complete `index.d.ts` covering every config option, callback, method, and type
+- `NovixoConfig`, `QueueItem`, `SendData`, `OptimisticOptions` interfaces
+- All enums typed: `Priority`, `NetworkState`, `ConflictStrategy`, `DedupeStrategy`, `SafeModeState`, `TimelineEvent`, `LogLevel`
+- `package.json` now includes `"types": "index.d.ts"`
+
+**6b — Exponential Backoff**
+- `backoff.js` — calculates smart retry delays per attempt
+- Formula: `min(baseDelay * 2^attempt, maxDelay) + jitter`
+- Attempt 1→1s, 2→2s, 3→4s, 4→8s, 5→16s, capped at 30s
+- Jitter prevents thundering herd (1000 clients retrying simultaneously)
+- `backoffOptions` config: `baseDelay`, `maxDelay`, `multiplier`, `jitter`
+- `backoff: false` to disable
+
+**6c — Request Timeout + Auto-Queue Fallback**
+- `timeout.js` — wraps every syncHandler call with a configurable timeout
+- If handler hangs beyond `timeoutMs` (default 10s) → cancelled + re-queued
+- `NovixoTimeoutError` custom error class
+- `onTimeout` callback — fires when an item times out
+- `timeout: false` to disable
+
+**6d — Queue Cancel / Edit**
+- `queue-manager.js` — cancel and update items before they sync
+- `Novixo.cancelItem(id)` — remove item permanently
+- `Novixo.updateItem(id, newData)` — replace payload + reset retries
+- `Novixo.hasItem(id)` — check if item is still queued
+- `Novixo.getItem(id)` — retrieve item by ID
+
+**6e — Optimistic UI Helper**
+- `optimistic.js` — instant UI updates with background sync + auto-revert
+- `Novixo.sendOptimistic(data, { onOptimistic, onConfirmed, onReverted })`
+- UI updates immediately via `onOptimistic`
+- `onConfirmed` fires when server confirms
+- `onReverted` fires if sync fails — revert your UI cleanly
+- `Novixo.getPendingOptimisticCount()` — how many optimistic items are in flight
