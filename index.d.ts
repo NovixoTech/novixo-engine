@@ -208,6 +208,7 @@ export interface NovixoConfig {
   // ── Core ──
   platform?:      "web" | "mobile" | null;
   autoSync?:      boolean;
+
   // ── Retry ──
   retryLimit?:  number;
   retryDelay?:  RetryDelayMap;
