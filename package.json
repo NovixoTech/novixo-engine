@@ -1,6 +1,6 @@
 {
   "name": "novixo-engine",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "description": "An adaptive network intelligence engine for modern applications. Offline-first queuing, 4-state network awareness, priority sync, and conflict resolution.",
   "main": "index.js",
   "module": "index.js",
@@ -9,11 +9,16 @@
     ".": {
       "import": "./index.js",
       "require": "./index.cjs"
+    },
+    "./sw": {
+      "import": "./sw.js"
     }
   },
   "files": [
     "index.js",
     "index.cjs",
+    "index.d.ts",
+    "sw.js",
     "src/",
     "README.md",
     "CHANGELOG.md",
@@ -61,5 +66,6 @@
     "@react-native-async-storage/async-storage": {
       "optional": true
     }
-  }
+  },
+  "types": "index.d.ts"
 }
