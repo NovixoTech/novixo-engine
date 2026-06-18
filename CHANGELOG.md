@@ -66,7 +66,7 @@
 - Background health checks — auto-recovers when primary returns
 - `Novixo.fetchWithFailover(item, { endpoints: [...] })`
 - `endpoints: [url1, url2, url3]` in config
-- `Novixo.getFail overStats()`, `Novixo.getCurrentEndpoint()`
+- `Novixo.getFailoverStats()`, `Novixo.getCurrentEndpoint()`
 
 ---
 
