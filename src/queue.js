@@ -136,11 +136,3 @@ export async function clearQueue() {
 export function queueSize() {
   return queue.length;
 }
-
-/**
- * Return a direct reference to the live queue array (not a copy)
- * @returns {Array}
- */
-export function getQueueRef() {
-  return queue;
-}
