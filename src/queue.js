@@ -68,6 +68,14 @@ export function getQueue() {
 }
 
 /**
+ * Return a direct reference to the live queue array (not a copy)
+ * @returns {Array}
+ */
+export function getQueueRef() {
+  return queue;
+}
+
+/**
  * Get only pending items (not yet synced)
  * @returns {Array}
  */
