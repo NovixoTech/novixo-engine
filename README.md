@@ -1,6 +1,7 @@
 # Novixo Engine
 
-> **The adaptive network intelligence engine for modern applications.**
+> **Novixo Engine is an adaptive network intelligence layer for apps that can't afford to break when the network does. Most SDKs treat connectivity as binary, online or offline. Real networks degrade, flap, and recover unpredictably, especially on mobile.**
+> Novixo Engine detects this in real time and adapts automatically, batching on weak connections, queuing offline, and prioritizing what matters most.
 > Build apps that work everywhere — online, offline, slow networks, unstable connections.
 
 [![npm version](https://img.shields.io/npm/v/novixo-engine.svg)](https://www.npmjs.com/package/novixo-engine)
