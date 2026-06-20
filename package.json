@@ -1,6 +1,6 @@
 {
   "name": "novixo-engine",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "An adaptive network intelligence engine for modern applications. Offline-first queuing, 4-state network awareness, priority sync, and conflict resolution.",
   "main": "index.js",
   "module": "index.js",
@@ -48,12 +48,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/novixo-engine.git"
+    "url": "https://github.com/NovixoTech/novixo-engine.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_USERNAME/novixo-engine/issues"
+    "url": "https://github.com/NovixoTech/novixo-engine/issues"
   },
-  "homepage": "https://github.com/YOUR_USERNAME/novixo-engine#readme",
+  "homepage": "https://github.com/NovixoTech/novixo-engine#readme",
   "engines": {
     "node": ">=16.0.0"
   },
