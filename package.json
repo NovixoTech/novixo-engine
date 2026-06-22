@@ -1,6 +1,6 @@
 {
   "name": "novixo-engine",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "An adaptive network intelligence engine for modern applications. Offline-first queuing, 4-state network awareness, priority sync, and conflict resolution.",
   "main": "index.js",
   "module": "index.js",
