@@ -447,7 +447,7 @@ import { AgentLogger } from "novixo-agent-logger";
 
 const ai = new AIRequestManager();
 const logger = new AgentLogger();
-G
+
 logger.attachToNovixoAI(ai);
 // Every AI call, rate-limit, and failover is now automatically logged
 ```
