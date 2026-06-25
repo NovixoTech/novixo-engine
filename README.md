@@ -456,4 +456,4 @@ logger.attachToNovixoAI(ai);
 
 ## License
 
-MIT © NovixoTech
+MIT © NovixoTech (github.com/NovixoTech) 
